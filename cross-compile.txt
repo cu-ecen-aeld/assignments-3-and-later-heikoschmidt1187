@@ -1,3 +1,6 @@
+cross-gcc version:
+------------------
+
 heiko@Ubuntu:~/repos/assignment-2-heikoschmidt1187$ aarch64-none-linux-gnu-gcc -v
 Es werden eingebaute Spezifikationen verwendet.
 COLLECT_GCC=aarch64-none-linux-gnu-gcc
@@ -8,5 +11,21 @@ Thread-Modell: posix
 Unterstützte LTO-Kompressionsalgorithmen: zlib
 gcc-Version 13.3.1 20240614 (Arm GNU Toolchain 13.3.Rel1 (Build arm-13.24)) 
 
+sysroot:
+--------
 heiko@Ubuntu:~/repos/assignment-2-heikoschmidt1187$ aarch64-none-linux-gnu-gcc -print-sysroot
 /home/heiko/bin/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-linux-gnu/bin/../aarch64-none-linux-gnu/libc
+
+cross compile:
+--------------
+heiko@Ubuntu:~/repos/assignment-2-heikoschmidt1187/finder-app$ make clean
+rm -f writer writer.o
+
+heiko@Ubuntu:~/repos/assignment-2-heikoschmidt1187/finder-app$ CROSS_COMPILE=aarch64-none-linux-gnu- make
+aarch64-none-linux-gnu-gcc    -c -o writer.o writer.c
+aarch64-none-linux-gnu-gcc   writer.o   -o writer
+
+file output:
+------------
+heiko@Ubuntu:~/repos/assignment-2-heikoschmidt1187/finder-app$ file writer
+writer: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), dynamically linked, interpreter /lib/ld-linux-aarch64.so.1, for GNU/Linux 3.7.0, with debug_info, not stripped
