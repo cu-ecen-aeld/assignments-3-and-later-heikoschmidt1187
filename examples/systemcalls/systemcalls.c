@@ -29,11 +29,12 @@ bool do_system(const char *cmd)
     return cmd == NULL ? ret > 0 : ret == 0;
 }
 
-bool do_exec_internal(char * outfile, int count, va_list args)
+bool do_exec_internal(const char * outfile, int count, va_list args)
 {
     char * command[count+1];
     int i;
     bool ret = false;
+
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
@@ -42,9 +43,6 @@ bool do_exec_internal(char * outfile, int count, va_list args)
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
     //command[count] = command[count];
-
-    if(command[0][0] != '/')
-        goto out;
 
     // create child process that will handle execv
     fflush(stdout);
@@ -58,7 +56,7 @@ bool do_exec_internal(char * outfile, int count, va_list args)
     } else if (pid == 0) {
         if(outfile != NULL) {
             // get file descriptor for the output file to redirect standard output
-            int fd = open(outfile, O_WRONLY | O_TRUNC| O_CREAT, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
+            int fd = open(outfile, O_WRONLY | O_TRUNC | O_CREAT, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
             if (fd < 0)
                 goto out;
 
@@ -74,8 +72,8 @@ bool do_exec_internal(char * outfile, int count, va_list args)
         if(count <= 0)
             goto out;
 
-        if(execv(command[0], &command[0]) < 0)
-            goto out;
+        if(execv(command[0], command) < 0)
+            exit(EXIT_FAILURE); 
 
     } else {
         // this is the parent
@@ -118,9 +116,11 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-    bool ret = do_exec_internal(NULL, count, args);
 
+    // do exec
+    bool ret = do_exec_internal(NULL, count, args);
     va_end(args);
+
     return ret;
 }
 
@@ -142,7 +142,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
     // do exec
-    bool ret = do_exec_internal(NULL, count, args);
+    bool ret = do_exec_internal(outputfile, count, args);
     va_end(args);
 
     return ret;
