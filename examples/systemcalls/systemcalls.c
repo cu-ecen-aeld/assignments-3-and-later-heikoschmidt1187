@@ -29,6 +29,67 @@ bool do_system(const char *cmd)
     return cmd == NULL ? ret > 0 : ret == 0;
 }
 
+bool do_exec_internal(char * outfile, int count, va_list args)
+{
+    char * command[count+1];
+    int i;
+    bool ret = false;
+    for(i=0; i<count; i++)
+    {
+        command[i] = va_arg(args, char *);
+    }
+    command[count] = NULL;
+    // this line is to avoid a compile warning before your implementation is complete
+    // and may be removed
+    //command[count] = command[count];
+
+    if(command[0][0] != '/')
+        goto out;
+
+    // create child process that will handle execv
+    fflush(stdout);
+    pid_t pid = fork();
+    int child_ret;
+
+    if(pid < 0) {
+        // error occured
+        goto out;
+
+    } else if (pid == 0) {
+        if(outfile != NULL) {
+            // get file descriptor for the output file to redirect standard output
+            int fd = open(outfile, O_WRONLY | O_TRUNC| O_CREAT, S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH);
+            if (fd < 0)
+                goto out;
+
+            // redirect standard output
+            if(dup2(fd, 1) < 0) {
+                close(fd);
+                goto out;
+            }
+            close(fd);
+        }
+
+        // this is the child
+        if(count <= 0)
+            goto out;
+
+        if(execv(command[0], &command[0]) < 0)
+            goto out;
+
+    } else {
+        // this is the parent
+        if(wait(&child_ret) < 0)
+            goto out;
+
+        ret = WEXITSTATUS(child_ret) == 0 ? true : false;
+        goto out;
+    }
+
+out:
+    return ret;
+}
+
 /**
 * @param count -The numbers of variables passed to the function. The variables are command to execute.
 *   followed by arguments to pass to the command
@@ -47,17 +108,6 @@ bool do_exec(int count, ...)
 {
     va_list args;
     va_start(args, count);
-    char * command[count+1];
-    int i;
-    bool ret = false;
-    for(i=0; i<count; i++)
-    {
-        command[i] = va_arg(args, char *);
-    }
-    command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    //command[count] = command[count];
 
 /*
  * TODO:
@@ -68,33 +118,8 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-    // create child process that will handle execv
-    fflush(stdout);
-    pid_t pid = fork();
-    int child_ret;
+    bool ret = do_exec_internal(NULL, count, args);
 
-    if(pid < 0) {
-        // error occured
-        goto cleanup;
-
-    } else if (pid == 0) {
-        // this is the child
-        if(count <= 0)
-            goto cleanup;
-
-        if(execv(command[0], &command[0]) < 0)
-            goto cleanup;
-
-    } else {
-        // this is the parent
-        if(wait(&child_ret) < 0)
-            goto cleanup;
-
-        ret = child_ret == 0 ? true : false;
-        goto cleanup;
-    }
-
-cleanup:
     va_end(args);
     return ret;
 }
@@ -108,17 +133,6 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 {
     va_list args;
     va_start(args, count);
-    char * command[count+1];
-    bool ret = false;
-    int i;
-    for(i=0; i<count; i++)
-    {
-        command[i] = va_arg(args, char *);
-    }
-    command[count] = NULL;
-    // this line is to avoid a compile warning before your implementation is complete
-    // and may be removed
-    //command[count] = command[count];
 
 /*
  * TODO
@@ -127,22 +141,8 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
-    // get file descriptor for the output file to redirect standard output
-    int fd = open(outputfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
-    if (fd < 0)
-        goto cleanup;
-
-    // redirect standard output
-    if(dup2(fd, 1) < 0)
-        goto cleanup;
-
     // do exec
-    ret = do_exec(count, &command[1]);
-
-cleanup:
-    if(fd >= 0)
-        close(fd);
-
+    bool ret = do_exec_internal(NULL, count, args);
     va_end(args);
 
     return ret;
