@@ -1,5 +1,10 @@
 #include "systemcalls.h"
 
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
+
 /**
  * @param cmd the command to execute with system()
  * @return true if the command in @param cmd was executed
@@ -17,7 +22,11 @@ bool do_system(const char *cmd)
  *   or false() if it returned a failure
 */
 
-    return true;
+    int ret = system(cmd);
+
+    // if cmd == NULL, the return value indicates if a shell is available
+    // handle "no shell" as error
+    return cmd == NULL ? ret > 0 : ret == 0;
 }
 
 /**
@@ -40,6 +49,7 @@ bool do_exec(int count, ...)
     va_start(args, count);
     char * command[count+1];
     int i;
+    bool ret = false;
     for(i=0; i<count; i++)
     {
         command[i] = va_arg(args, char *);
@@ -47,7 +57,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    //command[count] = command[count];
 
 /*
  * TODO:
@@ -58,10 +68,34 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    // create child process that will handle execv
+    pid_t pid = fork();
+    int child_ret;
 
+    if(pid < 0) {
+        // error occured
+        goto cleanup;
+
+    } else if (pid == 0) {
+        // this is the child
+        if(count <= 0)
+            goto cleanup;
+
+        if(execv(command[0], &command[0]) < 0)
+            goto cleanup;
+
+    } else {
+        // this is the parent
+        if(wait(&child_ret) < 0)
+            goto cleanup;
+
+        ret = child_ret == 0 ? true : false;
+        goto cleanup;
+    }
+
+cleanup:
     va_end(args);
-
-    return true;
+    return ret;
 }
 
 /**
@@ -74,6 +108,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     va_list args;
     va_start(args, count);
     char * command[count+1];
+    bool ret = false;
     int i;
     for(i=0; i<count; i++)
     {
@@ -82,8 +117,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
-
+    //command[count] = command[count];
 
 /*
  * TODO
@@ -92,8 +126,23 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    // get file descriptor for the output file to redirect standard output
+    int fd = open(outputfile, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+    if (fd < 0)
+        goto cleanup;
+
+    // redirect standard output
+    if(dup2(fd, 1) < 0)
+        goto cleanup;
+
+    // do exec
+    ret = do_exec(count, &command[1]);
+
+cleanup:
+    if(fd >= 0)
+        close(fd);
 
     va_end(args);
 
-    return true;
+    return ret;
 }
