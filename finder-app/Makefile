@@ -1,13 +1,9 @@
-CC=gcc
-CROSS_COMPILE=
+CC=${CROSS_COMPILE}gcc
 
 all: writer
 
 clean:
 	rm -f writer writer.o
 
-%o:%c
-	$(CROSS_COMPILE)$(CC) -c -o $@ $< -Wall -Werror
-
 writer: writer.o
-	$(CROSS_COMPILE)$(CC) -o $@ $^
+	$(CC) -o $@ $^
