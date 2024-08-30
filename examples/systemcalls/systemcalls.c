@@ -69,6 +69,7 @@ bool do_exec(int count, ...)
  *
 */
     // create child process that will handle execv
+    fflush(stdout);
     pid_t pid = fork();
     int child_ret;
 
