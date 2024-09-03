@@ -108,6 +108,7 @@ static void signal_handler(const int signum)
 static int register_sighandler()
 {
     struct sigaction sa;
+
     sa.sa_handler = &signal_handler;
 
     sigaction(SIGINT, &sa, NULL);
