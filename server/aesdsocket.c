@@ -4,6 +4,7 @@
  */
 #include <signal.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <syslog.h>
@@ -20,13 +21,14 @@ static void signal_handler(const int signum);
 
 static int register_sighandler();
 static int get_server_socket();
+static int handle_connection(const int client_sock);
 
 static bool appRun = true;
+static int srv_sock = -1;
 
 int main(int argc, char **argv)
 {
     int ret = 0;
-    int srv_sock;
     int client_sock = -1;
 
     openlog("aesdsocket", 0, LOG_USER);
@@ -65,11 +67,16 @@ int main(int argc, char **argv)
             goto clean;
         }
         syslog(LOG_INFO, "Accepted connection from %s", buf);
+
+        handle_connection(client_sock);
     }
 
     syslog(LOG_INFO, "Caught signal, exiting");
 
 clean:
+    // delete file
+    remove("/var/tmp/aesdsocketdata");
+
     // close client socket
     if(client_sock >= 0)
         close(client_sock);
@@ -86,6 +93,8 @@ clean:
 
 static void signal_handler(const int signum)
 {
+    if (srv_sock >= 0)
+        shutdown(srv_sock, SHUT_RDWR);
     appRun = false;
 }
 
@@ -136,4 +145,64 @@ static int get_server_socket()
     }
 
     return fd;
+}
+
+static int handle_connection(const int client_sock)
+{
+    // open the socketdata file
+    FILE *fp = fopen("/var/tmp/aesdsocketdata", "a+");
+    if (fp == NULL) {
+        syslog(LOG_ERR, "Error opening file: %s", strerror(errno));
+        return -1;
+    }
+
+    // transform client socket to fd to read like a file
+    FILE *sock_fp = fdopen(client_sock, "a+");
+    if (sock_fp < 0) {
+        syslog(LOG_ERR, "Error open socket fd: %s", strerror(errno));
+        fclose(fp);
+        return -1;
+    }
+
+    // read from socket, line by line
+    while(appRun) {
+        char *line = NULL;
+        size_t len;
+        size_t read = getline(&line, &len, sock_fp);
+
+        // if client did close connection (or any other error), we're done here
+        if(read == -1)
+            break;
+
+        // copy the line to the output file
+        if(fputs(line, fp) < 0) {
+            syslog(LOG_ERR, "Eror writing to file: %s", strerror(errno));
+            break;
+        }
+
+        // in response, send the complete content of the file back
+        free(line);
+        line = NULL;
+        len = 0;
+
+        rewind(fp);
+        while(true) {
+            read = getline(&line, &len, fp);
+            if (read == -1)
+                break;
+
+            if(fputs(line, sock_fp) < 0) {
+                syslog(LOG_ERR, "Eror writing to client: %s", strerror(errno));
+                break;
+            }
+
+            free(line);
+            line = NULL;
+            len = 0;
+        }
+    }
+
+    fclose(sock_fp);
+    fclose(fp);
+    return 0;
 }
