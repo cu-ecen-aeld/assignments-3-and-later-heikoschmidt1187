@@ -14,6 +14,8 @@
 #include <unistd.h>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
+
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -22,6 +24,7 @@ static void signal_handler(const int signum);
 static int register_sighandler();
 static int get_server_socket();
 static int handle_connection(const int client_sock);
+static void run_as_daemon();
 
 static bool appRun = true;
 static int srv_sock = -1;
@@ -46,6 +49,10 @@ int main(int argc, char **argv)
         ret = -1;
         goto clean;
     }
+
+    // check if program shall run as daemon
+    if (argc == 2 && strcmp("-d", argv[1]) == 0)
+        run_as_daemon();
 
     while(appRun) {
         // wait for next client connection
@@ -205,4 +212,41 @@ static int handle_connection(const int client_sock)
     fclose(sock_fp);
     fclose(fp);
     return 0;
+}
+
+static void run_as_daemon()
+{
+    const pid_t pid = fork();
+
+    if (pid < 0) {
+        syslog(LOG_ERR, "Error forking: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    if (pid == 0) {
+        // this is the daemon
+
+        // reset file umask
+        umask(0);
+
+        // set the sid
+        if (setsid() == -1) {
+            syslog(LOG_ERR, "Error on setsid: %s", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+
+        // change to root dir
+        if (chdir("/") < 0) {
+            syslog(LOG_ERR, "Error on changing to root: %s", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+    
+        // redirect stdin, stdout and stderr to /dev/null
+        stdin = freopen("/dev/null", "r", stdin);
+        stdout = freopen("/dev/null", "r", stdout);
+        stderr = freopen("/dev/null", "r", stderr);
+    } else {
+        // let init inherit the process
+        exit(EXIT_SUCCESS);
+    }
 }
