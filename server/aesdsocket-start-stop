@@ -1,0 +1,18 @@
+#!/bin/sh
+
+case "$1" in
+    start)
+        echo "Starting aesdserver"
+        start-stop-daemon -S -n aesdserver -d
+        ;;
+
+    stop)
+        echo "Stopping aesdserver"
+        start-stop-daemon -K -n aesdserver
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+    exit 1
+esac
+
+exit 0
