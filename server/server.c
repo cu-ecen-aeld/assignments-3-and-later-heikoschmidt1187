@@ -33,6 +33,9 @@ static void send_all_lines(void);
 
 int init_server(void)
 {
+    // delete file
+    remove(DATAFILE);
+
     // get the socket
     srv_sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
 
@@ -84,7 +87,7 @@ int process_server(void)
         socklen_t l = sizeof(struct sockaddr);
 
         client_sock = accept(srv_sock, (struct sockaddr *)&client_addr, &l);
-        if (client_sock < 0 && client_sock != EWOULDBLOCK)
+        if (client_sock < 0 && errno != EWOULDBLOCK && errno != EAGAIN)
         {
             syslog(LOG_ERR, "Error on accept: %s", strerror(errno));
             return -1;
