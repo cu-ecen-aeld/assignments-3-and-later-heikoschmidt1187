@@ -156,7 +156,7 @@ static int handle_connection()
             return -1;
         }
 
-        for (uint32_t local_start_pos = 0; local_start_pos < recv_len;)
+        for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
         {
             // check for \n
             uint32_t npos;
@@ -165,7 +165,7 @@ static int handle_connection()
                     break;
 
             // resize line buffer
-            line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 1);
+            line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
 
             if (line_buf == NULL)
             {
@@ -173,8 +173,11 @@ static int handle_connection()
                 exit(EXIT_FAILURE);
             }
 
+            // zero newly allocated memory
+            memset(&line_buf[cur_buf_len], 0x0, npos + 2);
+
             // copy line until \n inclusive
-            memcpy(&line_buf[cur_buf_len], local_buf, npos);
+            memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
 
             // only if \n has been found, write to file and return
             if (npos < recv_len)
@@ -227,7 +230,7 @@ static void send_all_lines(void)
         return;
 
     // open the socketdata file
-    FILE *fp = fopen(DATAFILE, "a+");
+    FILE *fp = fopen(DATAFILE, "r");
 
     if (fp == NULL)
     {
@@ -237,7 +240,7 @@ static void send_all_lines(void)
 
     while (getline(&line, &len, fp) > 0)
     {
-        if (send(client_sock, line, len, 0) < 0)
+        if (send(client_sock, line, strlen(line), 0) < 0)
         {
             syslog(LOG_ERR, "Error sending line to client: %s", strerror(errno));
             exit(EXIT_FAILURE);
