@@ -7,6 +7,8 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 
+#include <stdbool.h>
+#include <time.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -14,28 +16,59 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
-
+#include <sys/queue.h>
 #include <netinet/in.h>
 
 #define DATAFILE "/var/tmp/aesdsocketdata"
 #define LOCAL_LINE_BUF_SIZE 512
+#define TIME_FORMAT_BUF_SIZE 64
+
+typedef struct thread_data_s
+{
+    pthread_t id;
+    pthread_mutex_t *mutex;
+    int client_sock;
+    
+} thread_data_t;
+
+typedef struct slist_data_s
+{
+    thread_data_t thread_data;
+    SLIST_ENTRY(slist_data_s) entries;
+} slist_data_t;
 
 static int srv_sock = -1;
-static int client_sock = -1;
 
 static char *line_buf = NULL;
 static uint32_t cur_buf_len = 0;
 
-static int handle_connection(void);
+static SLIST_HEAD(slisthead, slist_data_s) list;
+
+static pthread_t timer_thread;
+
+static pthread_mutex_t file_mutex;
+
+static void *handle_connection(void *data);
+static void *log_timestamp(void *data);
 static void write_line_to_file(const char *const line);
-static void send_all_lines(void);
+static void send_all_lines(const int sock);
 
 int init_server(void)
 {
+    // initialize list of threads
+    SLIST_INIT(&list);
+    
+    // init the mutex
+    if(pthread_mutex_init(&file_mutex, NULL) != 0) {
+        syslog(LOG_ERR, "Error initializing file mutex");
+        exit(EXIT_FAILURE);
+    }
+
     // delete file
     remove(DATAFILE);
-
+    
     // get the socket
     srv_sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
 
@@ -68,10 +101,22 @@ int init_server(void)
     }
 
     // listen on the socket
-    if (listen(srv_sock, 1) < 0)
+    if (listen(srv_sock, 100) < 0)
     {
         syslog(LOG_ERR, "Error listen to socket: %s", strerror(errno));
         close(srv_sock);
+        exit(EXIT_FAILURE);
+    }
+    
+    // start timer thread
+    thread_data_t *data = (thread_data_t*)malloc(sizeof(thread_data_t));
+    if(data == NULL) {
+        syslog(LOG_ERR, "Error getting thread data: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    if(pthread_create(&timer_thread, NULL, log_timestamp, (void*)data) < 0) {
+        syslog(LOG_ERR, "Error creating timer thread");
         exit(EXIT_FAILURE);
     }
 
@@ -80,19 +125,18 @@ int init_server(void)
 
 int process_server(void)
 {
-    if (client_sock < 0)
+    // wait for next client connection
+    struct sockaddr_in client_addr;
+    socklen_t l = sizeof(struct sockaddr);
+
+    int client_sock = accept(srv_sock, (struct sockaddr *)&client_addr, &l);
+    if (client_sock < 0 && errno != EWOULDBLOCK && errno != EAGAIN)
     {
-        // wait for next client connection
-        struct sockaddr_in client_addr;
-        socklen_t l = sizeof(struct sockaddr);
-
-        client_sock = accept(srv_sock, (struct sockaddr *)&client_addr, &l);
-        if (client_sock < 0 && errno != EWOULDBLOCK && errno != EAGAIN)
-        {
-            syslog(LOG_ERR, "Error on accept: %s", strerror(errno));
-            return -1;
-        }
-
+        syslog(LOG_ERR, "Error on accept: %s", strerror(errno));
+        return -1;
+    }
+    
+    if(client_sock >= 0) {
         // log new connection
         char buf[INET_ADDRSTRLEN];
         if (inet_ntop(AF_INET, (const void *)&client_addr.sin_addr, buf, INET_ADDRSTRLEN) == NULL)
@@ -101,20 +145,34 @@ int process_server(void)
             return -1;
         }
         syslog(LOG_INFO, "Accepted connection from %s", buf);
+
+        // spawn thread for socket
+        slist_data_t *data = (slist_data_t*)malloc(sizeof(slist_data_t));
+        if(data == NULL) {
+            syslog(LOG_ERR, "Unable to get data for slist entry: %s", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+
+        data->thread_data.client_sock = client_sock;
+        data->thread_data.mutex = &file_mutex;
+        if(pthread_create(&(data->thread_data.id), NULL, &handle_connection, (void*)&data->thread_data) < 0) {
+            syslog(LOG_ERR, "Error creating client thread");
+            exit(EXIT_FAILURE);
+        }
+
+        SLIST_INSERT_HEAD(&list, data, entries);
     }
-    else
-    {
-        return handle_connection();
-    }
+    
+    // TODO: check all threads if joinable and join
 
     return 0;
 }
 
 void shutdown_server(void)
 {
-    // close client socket
-    if (client_sock >= 0)
-        close(client_sock);
+    // TODO: close all client connections
+    // TODO: end all threads
+    // TODO: close timer thread
 
     // close server socket
     if (srv_sock >= 0)
@@ -124,8 +182,10 @@ void shutdown_server(void)
     remove(DATAFILE);
 }
 
-static int handle_connection()
+static void* handle_connection(void *data)
 {
+    thread_data_t *thread_data = (thread_data_t*)data;
+
     // wait with timeout to read from the socket
     struct timeval to;
     to.tv_sec = 0;
@@ -134,26 +194,26 @@ static int handle_connection()
     fd_set set;
 
     FD_ZERO(&set);
-    FD_SET(client_sock, &set);
+    FD_SET(thread_data->client_sock, &set);
 
-    int ret = select(client_sock + 1, &set, NULL, NULL, &to);
+    int ret = select(thread_data->client_sock + 1, &set, NULL, NULL, &to);
 
     if (ret < 0)
     {
         syslog(LOG_ERR, "Error on select: %s", strerror(errno));
-        return -1;
+        exit(EXIT_FAILURE);
     }
     else if (ret > 0)
     {
         char local_buf[LOCAL_LINE_BUF_SIZE + 1];
         memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
 
-        ssize_t recv_len = recv(client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
+        ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
 
         if (recv_len < 0)
         {
             syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
-            return -1;
+            exit(EXIT_FAILURE);
         }
 
         for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
@@ -182,8 +242,15 @@ static int handle_connection()
             // only if \n has been found, write to file and return
             if (npos < recv_len)
             {
+                if(pthread_mutex_lock(thread_data->mutex) < 0) {
+                    syslog(LOG_ERR, "Error locking mutex");
+                    exit(EXIT_FAILURE);
+                }
+
                 write_line_to_file(line_buf);
-                send_all_lines();
+                send_all_lines(thread_data->client_sock);
+                
+                pthread_mutex_unlock(thread_data->mutex);
 
                 // reset the buffer
                 free(line_buf);
@@ -198,8 +265,6 @@ static int handle_connection()
     {
         // timeout
     }
-
-    return 0;
 }
 
 static void write_line_to_file(const char *const line)
@@ -212,7 +277,7 @@ static void write_line_to_file(const char *const line)
         exit(EXIT_FAILURE);
     }
 
-    if (fputs(line_buf, fp) < 0)
+    if (fputs(line, fp) < 0)
     {
         syslog(LOG_ERR, "Eror writing to file: %s", strerror(errno));
         exit(EXIT_FAILURE);
@@ -221,13 +286,10 @@ static void write_line_to_file(const char *const line)
     fclose(fp);
 }
 
-static void send_all_lines(void)
+static void send_all_lines(const int sock)
 {
     char *line = NULL;
     size_t len = 0;
-
-    if (client_sock < 0)
-        return;
 
     // open the socketdata file
     FILE *fp = fopen(DATAFILE, "r");
@@ -240,7 +302,7 @@ static void send_all_lines(void)
 
     while (getline(&line, &len, fp) > 0)
     {
-        if (send(client_sock, line, strlen(line), 0) < 0)
+        if (send(sock, line, strlen(line), 0) < 0)
         {
             syslog(LOG_ERR, "Error sending line to client: %s", strerror(errno));
             exit(EXIT_FAILURE);
@@ -253,4 +315,47 @@ static void send_all_lines(void)
     }
 
     fclose(fp);
+}
+
+static void *log_timestamp(void *data)
+{
+
+    bool *run = (bool*)data;
+    char time_string[TIME_FORMAT_BUF_SIZE];
+    struct timespec ts;
+
+    while(true) {
+        memset(time_string, 0x0, TIME_FORMAT_BUF_SIZE);
+
+        // get time and set target
+        if(clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+            syslog(LOG_ERR, "Error getting time: %s", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        
+        ts.tv_sec += 10;
+        
+        // get the timestamp
+        time_t t;
+        struct tm *t_s;
+
+        time(&t);
+        t_s = localtime(&t);
+        
+        // format the time
+        (void)strftime(time_string, TIME_FORMAT_BUF_SIZE, "timestamp: %a, %d %b %Y %T %z\n", t_s);
+        
+        // write timestamp to file
+        if(pthread_mutex_lock(&file_mutex) != 0) {
+            syslog(LOG_ERR, "Error locking mutex for time log");
+            exit(EXIT_FAILURE);
+        }
+        write_line_to_file(time_string);
+        pthread_mutex_unlock(&file_mutex);
+        
+        if(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
+            syslog(LOG_ERR, "Error on clock_nanosleep");
+            exit(EXIT_FAILURE);
+        }
+    }
 }
