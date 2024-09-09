@@ -185,85 +185,87 @@ void shutdown_server(void)
 static void* handle_connection(void *data)
 {
     thread_data_t *thread_data = (thread_data_t*)data;
+    
+    // TODO: handle ECONNRESET
+    // TODO: handle thread exit through signal
+    while(true) {
+        // wait with timeout to read from the socket
+        struct timeval to;
+        to.tv_sec = 0;
+        to.tv_usec = 10000;
 
-    // wait with timeout to read from the socket
-    struct timeval to;
-    to.tv_sec = 0;
-    to.tv_usec = 10000;
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(thread_data->client_sock, &set);
 
-    fd_set set;
-
-    FD_ZERO(&set);
-    FD_SET(thread_data->client_sock, &set);
-
-    int ret = select(thread_data->client_sock + 1, &set, NULL, NULL, &to);
-
-    if (ret < 0)
-    {
-        syslog(LOG_ERR, "Error on select: %s", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-    else if (ret > 0)
-    {
-        char local_buf[LOCAL_LINE_BUF_SIZE + 1];
-        memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
-
-        ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
-
-        if (recv_len < 0)
+        int ret = select(thread_data->client_sock + 1, &set, NULL, NULL, &to);
+        if (ret < 0)
         {
-            syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
+            syslog(LOG_ERR, "Error on select: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
-
-        for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
+        else if (ret > 0)
         {
-            // check for \n
-            uint32_t npos;
-            for (npos = 0; npos < recv_len; ++npos)
-                if (local_buf[npos] == '\n')
-                    break;
+            char local_buf[LOCAL_LINE_BUF_SIZE + 1];
+            memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
 
-            // resize line buffer
-            line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
+            ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
 
-            if (line_buf == NULL)
+            if (recv_len < 0)
             {
-                syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
+                syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
                 exit(EXIT_FAILURE);
             }
 
-            // zero newly allocated memory
-            memset(&line_buf[cur_buf_len], 0x0, npos + 2);
-
-            // copy line until \n inclusive
-            memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
-
-            // only if \n has been found, write to file and return
-            if (npos < recv_len)
+            for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
             {
-                if(pthread_mutex_lock(thread_data->mutex) < 0) {
-                    syslog(LOG_ERR, "Error locking mutex");
+                // check for \n
+                uint32_t npos;
+                for (npos = 0; npos < recv_len; ++npos)
+                    if (local_buf[npos] == '\n')
+                        break;
+
+                // resize line buffer
+                line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
+
+                if (line_buf == NULL)
+                {
+                    syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
                     exit(EXIT_FAILURE);
                 }
 
-                write_line_to_file(line_buf);
-                send_all_lines(thread_data->client_sock);
-                
-                pthread_mutex_unlock(thread_data->mutex);
+                // zero newly allocated memory
+                memset(&line_buf[cur_buf_len], 0x0, npos + 2);
 
-                // reset the buffer
-                free(line_buf);
-                line_buf = NULL;
-                cur_buf_len = 0;
+                // copy line until \n inclusive
+                memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
+
+                // only if \n has been found, write to file and return
+                if (npos < recv_len)
+                {
+                    if(pthread_mutex_lock(thread_data->mutex) < 0) {
+                        syslog(LOG_ERR, "Error locking mutex");
+                        exit(EXIT_FAILURE);
+                    }
+
+                    write_line_to_file(line_buf);
+                    send_all_lines(thread_data->client_sock);
+                    
+                    pthread_mutex_unlock(thread_data->mutex);
+
+                    // reset the buffer
+                    free(line_buf);
+                    line_buf = NULL;
+                    cur_buf_len = 0;
+                }
+
+                local_start_pos += npos;
             }
-
-            local_start_pos += npos;
         }
-    }
-    else
-    {
-        // timeout
+        else
+        {
+            // timeout
+        }
     }
 }
 
