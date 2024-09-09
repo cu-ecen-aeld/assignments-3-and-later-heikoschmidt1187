@@ -31,6 +31,7 @@ typedef struct thread_data_s
     pthread_mutex_t *mutex;
     int client_sock;
     char client_ip[INET_ADDRSTRLEN];
+    volatile bool *stop_thread;
     
 } thread_data_t;
 
@@ -46,6 +47,8 @@ static char *line_buf = NULL;
 static uint32_t cur_buf_len = 0;
 
 static SLIST_HEAD(slisthead, slist_data_s) list;
+
+static volatile bool stop_threads = false;
 
 static pthread_t timer_thread;
 
@@ -115,6 +118,10 @@ int init_server(void)
         syslog(LOG_ERR, "Error getting thread data: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
+    memset((void*)data, 0x0, sizeof(thread_data_t));
+
+    data->mutex = &file_mutex;
+    data->stop_thread = &stop_threads;
 
     if(pthread_create(&timer_thread, NULL, log_timestamp, (void*)data) < 0) {
         syslog(LOG_ERR, "Error creating timer thread");
@@ -169,11 +176,35 @@ int process_server(void)
     return 0;
 }
 
+void join_all_threads(void)
+{
+    // timer thread
+    thread_data_t *data;
+    pthread_join(timer_thread, (void**)&data);
+
+    if(data != NULL)
+        free(data);
+    
+    slist_data_t *e = NULL;
+    SLIST_FOREACH(e, &list, entries) {
+        if(e != NULL) {
+            pthread_join(e->thread_data.id, NULL);
+        }
+    }
+    
+    // delete list entries
+    while (!SLIST_EMPTY(&list)) {
+       e = SLIST_FIRST(&list);
+       SLIST_REMOVE_HEAD(&list, entries);
+       free(e);
+   }
+}
+
 void shutdown_server(void)
 {
-    // TODO: close all client connections
-    // TODO: end all threads
-    // TODO: close timer thread
+    stop_threads = true;
+
+    join_all_threads();
 
     // close server socket
     if (srv_sock >= 0)
@@ -193,11 +224,10 @@ static void* handle_connection(void *data)
     tv.tv_usec = 10000;
     if(setsockopt(thread_data->client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv) < 0) {
         syslog(LOG_ERR, "Error setting socket option: %s", strerror(errno));
-        exit(EXIT_FAILURE);
+        return NULL;
     }
     
-    // TODO: handle thread exit through signal
-    while(true) {
+    while(!thread_data->stop_thread) {
 
         char local_buf[LOCAL_LINE_BUF_SIZE + 1];
         memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
@@ -208,7 +238,7 @@ static void* handle_connection(void *data)
         {
             if(errno != EAGAIN && errno != EWOULDBLOCK) {
                 syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
-                exit(EXIT_FAILURE);
+                break;
             }
             
             // timeout received
@@ -232,7 +262,7 @@ static void* handle_connection(void *data)
             if (line_buf == NULL)
             {
                 syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
-                exit(EXIT_FAILURE);
+                return NULL;
             }
 
             // zero newly allocated memory
@@ -246,7 +276,7 @@ static void* handle_connection(void *data)
             {
                 if(pthread_mutex_lock(thread_data->mutex) < 0) {
                     syslog(LOG_ERR, "Error locking mutex");
-                    exit(EXIT_FAILURE);
+                    return NULL;
                 }
 
                 write_line_to_file(line_buf);
@@ -263,6 +293,8 @@ static void* handle_connection(void *data)
             local_start_pos += npos;
         }
     }
+
+    return NULL;
 }
 
 static void write_line_to_file(const char *const line)
@@ -318,17 +350,18 @@ static void send_all_lines(const int sock)
 static void *log_timestamp(void *data)
 {
 
-    bool *run = (bool*)data;
+    thread_data_t *thread_data = (thread_data_t*)data;
     char time_string[TIME_FORMAT_BUF_SIZE];
     struct timespec ts;
 
-    while(true) {
+    while(!thread_data->stop_thread) {
+
         memset(time_string, 0x0, TIME_FORMAT_BUF_SIZE);
 
         // get time and set target
         if(clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
             syslog(LOG_ERR, "Error getting time: %s", strerror(errno));
-            exit(EXIT_FAILURE);
+            break;
         }
         
         ts.tv_sec += 10;
@@ -346,14 +379,16 @@ static void *log_timestamp(void *data)
         // write timestamp to file
         if(pthread_mutex_lock(&file_mutex) != 0) {
             syslog(LOG_ERR, "Error locking mutex for time log");
-            exit(EXIT_FAILURE);
+            break;
         }
         write_line_to_file(time_string);
         pthread_mutex_unlock(&file_mutex);
         
         if(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
             syslog(LOG_ERR, "Error on clock_nanosleep");
-            exit(EXIT_FAILURE);
+            break;
         }
     }
+    
+    return thread_data;
 }
