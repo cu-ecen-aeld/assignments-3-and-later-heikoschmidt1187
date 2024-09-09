@@ -224,7 +224,7 @@ static void* handle_connection(void *data)
     tv.tv_usec = 10000;
     if(setsockopt(thread_data->client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv) < 0) {
         syslog(LOG_ERR, "Error setting socket option: %s", strerror(errno));
-        return NULL;
+        goto clean;
     }
     
     while(!thread_data->stop_thread) {
@@ -262,7 +262,7 @@ static void* handle_connection(void *data)
             if (line_buf == NULL)
             {
                 syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
-                return NULL;
+                goto clean;
             }
 
             // zero newly allocated memory
@@ -276,7 +276,7 @@ static void* handle_connection(void *data)
             {
                 if(pthread_mutex_lock(thread_data->mutex) < 0) {
                     syslog(LOG_ERR, "Error locking mutex");
-                    return NULL;
+                    goto clean;
                 }
 
                 write_line_to_file(line_buf);
@@ -293,6 +293,10 @@ static void* handle_connection(void *data)
             local_start_pos += npos;
         }
     }
+
+clean:
+    if(thread_data->client_sock >= 0)
+        close(thread_data->client_sock);
 
     return NULL;
 }
