@@ -30,6 +30,7 @@ typedef struct thread_data_s
     pthread_t id;
     pthread_mutex_t *mutex;
     int client_sock;
+    char client_ip[INET_ADDRSTRLEN];
     
 } thread_data_t;
 
@@ -137,21 +138,21 @@ int process_server(void)
     }
     
     if(client_sock >= 0) {
-        // log new connection
-        char buf[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, (const void *)&client_addr.sin_addr, buf, INET_ADDRSTRLEN) == NULL)
-        {
-            syslog(LOG_ERR, "Error getting IP string: %s", strerror(errno));
-            return -1;
-        }
-        syslog(LOG_INFO, "Accepted connection from %s", buf);
-
         // spawn thread for socket
         slist_data_t *data = (slist_data_t*)malloc(sizeof(slist_data_t));
         if(data == NULL) {
             syslog(LOG_ERR, "Unable to get data for slist entry: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
+        memset((void*)&data->thread_data, 0x0, sizeof(thread_data_t));
+        
+        // log new connection
+        if (inet_ntop(AF_INET, (const void *)&client_addr.sin_addr, data->thread_data.client_ip, INET_ADDRSTRLEN) == NULL)
+        {
+            syslog(LOG_ERR, "Error getting IP string: %s", strerror(errno));
+            return -1;
+        }
+        syslog(LOG_INFO, "Accepted connection from %s", data->thread_data.client_ip);
 
         data->thread_data.client_sock = client_sock;
         data->thread_data.mutex = &file_mutex;
@@ -186,85 +187,80 @@ static void* handle_connection(void *data)
 {
     thread_data_t *thread_data = (thread_data_t*)data;
     
-    // TODO: handle ECONNRESET
+    // set receive timeout on socket to avoid blocking infinitely
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 10000;
+    if(setsockopt(thread_data->client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv) < 0) {
+        syslog(LOG_ERR, "Error setting socket option: %s", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    
     // TODO: handle thread exit through signal
     while(true) {
-        // wait with timeout to read from the socket
-        struct timeval to;
-        to.tv_sec = 0;
-        to.tv_usec = 10000;
 
-        fd_set set;
-        FD_ZERO(&set);
-        FD_SET(thread_data->client_sock, &set);
+        char local_buf[LOCAL_LINE_BUF_SIZE + 1];
+        memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
 
-        int ret = select(thread_data->client_sock + 1, &set, NULL, NULL, &to);
-        if (ret < 0)
+        ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
+
+        if (recv_len < 0)
         {
-            syslog(LOG_ERR, "Error on select: %s", strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-        else if (ret > 0)
-        {
-            char local_buf[LOCAL_LINE_BUF_SIZE + 1];
-            memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
-
-            ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
-
-            if (recv_len < 0)
-            {
+            if(errno != EAGAIN && errno != EWOULDBLOCK) {
                 syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
                 exit(EXIT_FAILURE);
             }
+            
+            // timeout received
+            continue;
+        } else if (recv_len == 0) {
+            syslog(LOG_INFO, "Closed connection from %s", thread_data->client_ip);
+            break;
+        }
 
-            for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
+        for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
+        {
+            // check for \n
+            uint32_t npos;
+            for (npos = 0; npos < recv_len; ++npos)
+                if (local_buf[npos] == '\n')
+                    break;
+
+            // resize line buffer
+            line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
+
+            if (line_buf == NULL)
             {
-                // check for \n
-                uint32_t npos;
-                for (npos = 0; npos < recv_len; ++npos)
-                    if (local_buf[npos] == '\n')
-                        break;
+                syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
+                exit(EXIT_FAILURE);
+            }
 
-                // resize line buffer
-                line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
+            // zero newly allocated memory
+            memset(&line_buf[cur_buf_len], 0x0, npos + 2);
 
-                if (line_buf == NULL)
-                {
-                    syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
+            // copy line until \n inclusive
+            memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
+
+            // only if \n has been found, write to file and return
+            if (npos < recv_len)
+            {
+                if(pthread_mutex_lock(thread_data->mutex) < 0) {
+                    syslog(LOG_ERR, "Error locking mutex");
                     exit(EXIT_FAILURE);
                 }
 
-                // zero newly allocated memory
-                memset(&line_buf[cur_buf_len], 0x0, npos + 2);
+                write_line_to_file(line_buf);
+                send_all_lines(thread_data->client_sock);
+                
+                pthread_mutex_unlock(thread_data->mutex);
 
-                // copy line until \n inclusive
-                memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
-
-                // only if \n has been found, write to file and return
-                if (npos < recv_len)
-                {
-                    if(pthread_mutex_lock(thread_data->mutex) < 0) {
-                        syslog(LOG_ERR, "Error locking mutex");
-                        exit(EXIT_FAILURE);
-                    }
-
-                    write_line_to_file(line_buf);
-                    send_all_lines(thread_data->client_sock);
-                    
-                    pthread_mutex_unlock(thread_data->mutex);
-
-                    // reset the buffer
-                    free(line_buf);
-                    line_buf = NULL;
-                    cur_buf_len = 0;
-                }
-
-                local_start_pos += npos;
+                // reset the buffer
+                free(line_buf);
+                line_buf = NULL;
+                cur_buf_len = 0;
             }
-        }
-        else
-        {
-            // timeout
+
+            local_start_pos += npos;
         }
     }
 }
