@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 static bool appRun = true;
 
@@ -24,6 +25,7 @@ int register_sighandler(void)
 {
     struct sigaction sa;
 
+    memset((void*)&sa, 0x0, sizeof(struct sigaction));
     sa.sa_handler = &signal_handler;
 
     sigaction(SIGINT, &sa, NULL);

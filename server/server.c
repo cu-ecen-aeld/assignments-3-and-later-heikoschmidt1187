@@ -43,9 +43,6 @@ typedef struct slist_data_s
 
 static int srv_sock = -1;
 
-static char *line_buf = NULL;
-static uint32_t cur_buf_len = 0;
-
 static SLIST_HEAD(slisthead, slist_data_s) list;
 
 static volatile bool stop_threads = false;
@@ -56,8 +53,8 @@ static pthread_mutex_t file_mutex;
 
 static void *handle_connection(void *data);
 static void *log_timestamp(void *data);
-static void write_line_to_file(const char *const line);
-static void send_all_lines(const int sock);
+static void write_line_to_file(pthread_mutex_t *mutex, const char *const line);
+static void send_all_lines(pthread_mutex_t *mutex, const int sock);
 
 int init_server(void)
 {
@@ -163,6 +160,8 @@ int process_server(void)
 
         data->thread_data.client_sock = client_sock;
         data->thread_data.mutex = &file_mutex;
+        data->thread_data.stop_thread = &stop_threads;
+
         if(pthread_create(&(data->thread_data.id), NULL, &handle_connection, (void*)&data->thread_data) < 0) {
             syslog(LOG_ERR, "Error creating client thread");
             exit(EXIT_FAILURE);
@@ -217,6 +216,8 @@ void shutdown_server(void)
 static void* handle_connection(void *data)
 {
     thread_data_t *thread_data = (thread_data_t*)data;
+    char *line_buf = NULL;
+    uint32_t cur_buf_len = 0;
     
     // set receive timeout on socket to avoid blocking infinitely
     struct timeval tv;
@@ -227,7 +228,7 @@ static void* handle_connection(void *data)
         goto clean;
     }
     
-    while(!thread_data->stop_thread) {
+    while(!(*thread_data->stop_thread)) {
 
         char local_buf[LOCAL_LINE_BUF_SIZE + 1];
         memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
@@ -274,15 +275,15 @@ static void* handle_connection(void *data)
             // only if \n has been found, write to file and return
             if (npos < recv_len)
             {
-                if(pthread_mutex_lock(thread_data->mutex) < 0) {
-                    syslog(LOG_ERR, "Error locking mutex");
-                    goto clean;
-                }
+                //if(pthread_mutex_lock(thread_data->mutex) < 0) {
+                    //syslog(LOG_ERR, "Error locking mutex");
+                    //goto clean;
+                //}
 
-                write_line_to_file(line_buf);
-                send_all_lines(thread_data->client_sock);
+                write_line_to_file(thread_data->mutex, line_buf);
+                send_all_lines(thread_data->mutex, thread_data->client_sock);
                 
-                pthread_mutex_unlock(thread_data->mutex);
+                //pthread_mutex_unlock(thread_data->mutex);
 
                 // reset the buffer
                 free(line_buf);
@@ -301,8 +302,13 @@ clean:
     return NULL;
 }
 
-static void write_line_to_file(const char *const line)
+static void write_line_to_file(pthread_mutex_t *mutex, const char *const line)
 {
+    if(pthread_mutex_lock(mutex) < 0) {
+        syslog(LOG_ERR, "Error locking mutex");
+        exit(EXIT_FAILURE);
+    }
+
     // open the socketdata file
     FILE *fp = fopen(DATAFILE, "a+");
     if (fp == NULL)
@@ -318,12 +324,19 @@ static void write_line_to_file(const char *const line)
     }
 
     fclose(fp);
+
+    pthread_mutex_unlock(mutex);
 }
 
-static void send_all_lines(const int sock)
+static void send_all_lines(pthread_mutex_t *mutex, const int sock)
 {
     char *line = NULL;
     size_t len = 0;
+
+    if(pthread_mutex_lock(mutex) < 0) {
+        syslog(LOG_ERR, "Error locking mutex");
+        exit(EXIT_FAILURE);
+    }
 
     // open the socketdata file
     FILE *fp = fopen(DATAFILE, "r");
@@ -348,7 +361,12 @@ static void send_all_lines(const int sock)
         len = 0;
     }
 
+    if(line != NULL)
+        free(line);
+
     fclose(fp);
+
+    pthread_mutex_unlock(mutex);
 }
 
 static void *log_timestamp(void *data)
@@ -358,7 +376,7 @@ static void *log_timestamp(void *data)
     char time_string[TIME_FORMAT_BUF_SIZE];
     struct timespec ts;
 
-    while(!thread_data->stop_thread) {
+    while(!(*thread_data->stop_thread)) {
 
         memset(time_string, 0x0, TIME_FORMAT_BUF_SIZE);
 
@@ -381,12 +399,12 @@ static void *log_timestamp(void *data)
         (void)strftime(time_string, TIME_FORMAT_BUF_SIZE, "timestamp: %a, %d %b %Y %T %z\n", t_s);
         
         // write timestamp to file
-        if(pthread_mutex_lock(&file_mutex) != 0) {
-            syslog(LOG_ERR, "Error locking mutex for time log");
-            break;
-        }
-        write_line_to_file(time_string);
-        pthread_mutex_unlock(&file_mutex);
+        //if(pthread_mutex_lock(&file_mutex) != 0) {
+            //syslog(LOG_ERR, "Error locking mutex for time log");
+            //break;
+        //}
+        write_line_to_file(thread_data->mutex, time_string);
+        //pthread_mutex_unlock(&file_mutex);
         
         if(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
             syslog(LOG_ERR, "Error on clock_nanosleep");
