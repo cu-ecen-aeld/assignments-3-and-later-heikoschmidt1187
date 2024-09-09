@@ -30,6 +30,8 @@ typedef struct thread_data_s
     pthread_t id;
     pthread_mutex_t *mutex;
     int client_sock;
+    char client_ip[INET_ADDRSTRLEN];
+    volatile bool *stop_thread;
     
 } thread_data_t;
 
@@ -45,6 +47,8 @@ static char *line_buf = NULL;
 static uint32_t cur_buf_len = 0;
 
 static SLIST_HEAD(slisthead, slist_data_s) list;
+
+static volatile bool stop_threads = false;
 
 static pthread_t timer_thread;
 
@@ -114,6 +118,10 @@ int init_server(void)
         syslog(LOG_ERR, "Error getting thread data: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
+    memset((void*)data, 0x0, sizeof(thread_data_t));
+
+    data->mutex = &file_mutex;
+    data->stop_thread = &stop_threads;
 
     if(pthread_create(&timer_thread, NULL, log_timestamp, (void*)data) < 0) {
         syslog(LOG_ERR, "Error creating timer thread");
@@ -137,21 +145,21 @@ int process_server(void)
     }
     
     if(client_sock >= 0) {
-        // log new connection
-        char buf[INET_ADDRSTRLEN];
-        if (inet_ntop(AF_INET, (const void *)&client_addr.sin_addr, buf, INET_ADDRSTRLEN) == NULL)
-        {
-            syslog(LOG_ERR, "Error getting IP string: %s", strerror(errno));
-            return -1;
-        }
-        syslog(LOG_INFO, "Accepted connection from %s", buf);
-
         // spawn thread for socket
         slist_data_t *data = (slist_data_t*)malloc(sizeof(slist_data_t));
         if(data == NULL) {
             syslog(LOG_ERR, "Unable to get data for slist entry: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
+        memset((void*)&data->thread_data, 0x0, sizeof(thread_data_t));
+        
+        // log new connection
+        if (inet_ntop(AF_INET, (const void *)&client_addr.sin_addr, data->thread_data.client_ip, INET_ADDRSTRLEN) == NULL)
+        {
+            syslog(LOG_ERR, "Error getting IP string: %s", strerror(errno));
+            return -1;
+        }
+        syslog(LOG_INFO, "Accepted connection from %s", data->thread_data.client_ip);
 
         data->thread_data.client_sock = client_sock;
         data->thread_data.mutex = &file_mutex;
@@ -168,11 +176,35 @@ int process_server(void)
     return 0;
 }
 
+void join_all_threads(void)
+{
+    // timer thread
+    thread_data_t *data;
+    pthread_join(timer_thread, (void**)&data);
+
+    if(data != NULL)
+        free(data);
+    
+    slist_data_t *e = NULL;
+    SLIST_FOREACH(e, &list, entries) {
+        if(e != NULL) {
+            pthread_join(e->thread_data.id, NULL);
+        }
+    }
+    
+    // delete list entries
+    while (!SLIST_EMPTY(&list)) {
+       e = SLIST_FIRST(&list);
+       SLIST_REMOVE_HEAD(&list, entries);
+       free(e);
+   }
+}
+
 void shutdown_server(void)
 {
-    // TODO: close all client connections
-    // TODO: end all threads
-    // TODO: close timer thread
+    stop_threads = true;
+
+    join_all_threads();
 
     // close server socket
     if (srv_sock >= 0)
@@ -186,87 +218,83 @@ static void* handle_connection(void *data)
 {
     thread_data_t *thread_data = (thread_data_t*)data;
     
-    // TODO: handle ECONNRESET
-    // TODO: handle thread exit through signal
-    while(true) {
-        // wait with timeout to read from the socket
-        struct timeval to;
-        to.tv_sec = 0;
-        to.tv_usec = 10000;
+    // set receive timeout on socket to avoid blocking infinitely
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 10000;
+    if(setsockopt(thread_data->client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv) < 0) {
+        syslog(LOG_ERR, "Error setting socket option: %s", strerror(errno));
+        return NULL;
+    }
+    
+    while(!thread_data->stop_thread) {
 
-        fd_set set;
-        FD_ZERO(&set);
-        FD_SET(thread_data->client_sock, &set);
+        char local_buf[LOCAL_LINE_BUF_SIZE + 1];
+        memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
 
-        int ret = select(thread_data->client_sock + 1, &set, NULL, NULL, &to);
-        if (ret < 0)
+        ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
+
+        if (recv_len < 0)
         {
-            syslog(LOG_ERR, "Error on select: %s", strerror(errno));
-            exit(EXIT_FAILURE);
-        }
-        else if (ret > 0)
-        {
-            char local_buf[LOCAL_LINE_BUF_SIZE + 1];
-            memset(&local_buf[0], 0x0, LOCAL_LINE_BUF_SIZE + 1);
-
-            ssize_t recv_len = recv(thread_data->client_sock, &local_buf[0], LOCAL_LINE_BUF_SIZE, 0);
-
-            if (recv_len < 0)
-            {
+            if(errno != EAGAIN && errno != EWOULDBLOCK) {
                 syslog(LOG_ERR, "Error on recv call: %s", strerror(errno));
-                exit(EXIT_FAILURE);
+                break;
             }
-
-            for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
-            {
-                // check for \n
-                uint32_t npos;
-                for (npos = 0; npos < recv_len; ++npos)
-                    if (local_buf[npos] == '\n')
-                        break;
-
-                // resize line buffer
-                line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
-
-                if (line_buf == NULL)
-                {
-                    syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
-                    exit(EXIT_FAILURE);
-                }
-
-                // zero newly allocated memory
-                memset(&line_buf[cur_buf_len], 0x0, npos + 2);
-
-                // copy line until \n inclusive
-                memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
-
-                // only if \n has been found, write to file and return
-                if (npos < recv_len)
-                {
-                    if(pthread_mutex_lock(thread_data->mutex) < 0) {
-                        syslog(LOG_ERR, "Error locking mutex");
-                        exit(EXIT_FAILURE);
-                    }
-
-                    write_line_to_file(line_buf);
-                    send_all_lines(thread_data->client_sock);
-                    
-                    pthread_mutex_unlock(thread_data->mutex);
-
-                    // reset the buffer
-                    free(line_buf);
-                    line_buf = NULL;
-                    cur_buf_len = 0;
-                }
-
-                local_start_pos += npos;
-            }
+            
+            // timeout received
+            continue;
+        } else if (recv_len == 0) {
+            syslog(LOG_INFO, "Closed connection from %s", thread_data->client_ip);
+            break;
         }
-        else
+
+        for (uint32_t local_start_pos = 0; local_start_pos < recv_len; ++local_start_pos)
         {
-            // timeout
+            // check for \n
+            uint32_t npos;
+            for (npos = 0; npos < recv_len; ++npos)
+                if (local_buf[npos] == '\n')
+                    break;
+
+            // resize line buffer
+            line_buf = (char *)realloc(line_buf, cur_buf_len + npos + 2);
+
+            if (line_buf == NULL)
+            {
+                syslog(LOG_ERR, "Error re-allocating memory: %s", strerror(errno));
+                return NULL;
+            }
+
+            // zero newly allocated memory
+            memset(&line_buf[cur_buf_len], 0x0, npos + 2);
+
+            // copy line until \n inclusive
+            memcpy(&line_buf[cur_buf_len], local_buf, npos + 1);
+
+            // only if \n has been found, write to file and return
+            if (npos < recv_len)
+            {
+                if(pthread_mutex_lock(thread_data->mutex) < 0) {
+                    syslog(LOG_ERR, "Error locking mutex");
+                    return NULL;
+                }
+
+                write_line_to_file(line_buf);
+                send_all_lines(thread_data->client_sock);
+                
+                pthread_mutex_unlock(thread_data->mutex);
+
+                // reset the buffer
+                free(line_buf);
+                line_buf = NULL;
+                cur_buf_len = 0;
+            }
+
+            local_start_pos += npos;
         }
     }
+
+    return NULL;
 }
 
 static void write_line_to_file(const char *const line)
@@ -322,17 +350,18 @@ static void send_all_lines(const int sock)
 static void *log_timestamp(void *data)
 {
 
-    bool *run = (bool*)data;
+    thread_data_t *thread_data = (thread_data_t*)data;
     char time_string[TIME_FORMAT_BUF_SIZE];
     struct timespec ts;
 
-    while(true) {
+    while(!thread_data->stop_thread) {
+
         memset(time_string, 0x0, TIME_FORMAT_BUF_SIZE);
 
         // get time and set target
         if(clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
             syslog(LOG_ERR, "Error getting time: %s", strerror(errno));
-            exit(EXIT_FAILURE);
+            break;
         }
         
         ts.tv_sec += 10;
@@ -350,14 +379,16 @@ static void *log_timestamp(void *data)
         // write timestamp to file
         if(pthread_mutex_lock(&file_mutex) != 0) {
             syslog(LOG_ERR, "Error locking mutex for time log");
-            exit(EXIT_FAILURE);
+            break;
         }
         write_line_to_file(time_string);
         pthread_mutex_unlock(&file_mutex);
         
         if(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
             syslog(LOG_ERR, "Error on clock_nanosleep");
-            exit(EXIT_FAILURE);
+            break;
         }
     }
+    
+    return thread_data;
 }
