@@ -30,8 +30,8 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    // bind server socket
-    if (init_server() < 0)
+    // init server stage 1
+    if (init_server_stage1() < 0)
     {
         closelog();
         exit(EXIT_FAILURE);
@@ -40,6 +40,13 @@ int main(int argc, char **argv)
     // check if program shall run as daemon
     if (argc == 2 && strcmp("-d", argv[1]) == 0)
         run_as_daemon();
+
+    // init server stage 2
+    if (init_server_stage2() < 0)
+    {
+        closelog();
+        exit(EXIT_FAILURE);
+    }
 
     while (is_app_running())
     {

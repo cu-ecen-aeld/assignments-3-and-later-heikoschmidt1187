@@ -25,6 +25,13 @@
 #define LOCAL_LINE_BUF_SIZE 512
 #define TIME_FORMAT_BUF_SIZE 64
 
+#define TIMESTAMP_LOG_CYCLE_S 10U
+#define TIMESTAMP_THREAD_CYCLE_MS 10U
+#define NSEC_PER_SEC 1000000000U
+#define NSEC_PER_MSEC 1000000U
+
+#define LOG_CYCLE_COUNT ((TIMESTAMP_LOG_CYCLE_S * 1000U) / TIMESTAMP_THREAD_CYCLE_MS)
+
 typedef struct thread_data_s
 {
     pthread_t id;
@@ -56,7 +63,7 @@ static void *log_timestamp(void *data);
 static void write_line_to_file(pthread_mutex_t *mutex, const char *const line);
 static void send_all_lines(pthread_mutex_t *mutex, const int sock);
 
-int init_server(void)
+int init_server_stage1(void)
 {
     // initialize list of threads
     SLIST_INIT(&list);
@@ -108,7 +115,12 @@ int init_server(void)
         close(srv_sock);
         exit(EXIT_FAILURE);
     }
-    
+
+    return 0;
+}
+
+int init_server_stage2(void)
+{
     // start timer thread
     thread_data_t *data = (thread_data_t*)malloc(sizeof(thread_data_t));
     if(data == NULL) {
@@ -170,8 +182,6 @@ int process_server(void)
         SLIST_INSERT_HEAD(&list, data, entries);
     }
     
-    // TODO: check all threads if joinable and join
-
     return 0;
 }
 
@@ -275,15 +285,8 @@ static void* handle_connection(void *data)
             // only if \n has been found, write to file and return
             if (npos < recv_len)
             {
-                //if(pthread_mutex_lock(thread_data->mutex) < 0) {
-                    //syslog(LOG_ERR, "Error locking mutex");
-                    //goto clean;
-                //}
-
                 write_line_to_file(thread_data->mutex, line_buf);
                 send_all_lines(thread_data->mutex, thread_data->client_sock);
-                
-                //pthread_mutex_unlock(thread_data->mutex);
 
                 // reset the buffer
                 free(line_buf);
@@ -371,10 +374,11 @@ static void send_all_lines(pthread_mutex_t *mutex, const int sock)
 
 static void *log_timestamp(void *data)
 {
-
     thread_data_t *thread_data = (thread_data_t*)data;
     char time_string[TIME_FORMAT_BUF_SIZE];
     struct timespec ts;
+
+    uint32_t cycle_counter = 0U;
 
     while(!(*thread_data->stop_thread)) {
 
@@ -386,30 +390,37 @@ static void *log_timestamp(void *data)
             break;
         }
         
-        ts.tv_sec += 10;
-        
-        // get the timestamp
-        time_t t;
-        struct tm *t_s;
+        ts.tv_nsec += TIMESTAMP_THREAD_CYCLE_MS * NSEC_PER_MSEC;    
 
-        time(&t);
-        t_s = localtime(&t);
-        
-        // format the time
-        (void)strftime(time_string, TIME_FORMAT_BUF_SIZE, "timestamp: %a, %d %b %Y %T %z\n", t_s);
-        
-        // write timestamp to file
-        //if(pthread_mutex_lock(&file_mutex) != 0) {
-            //syslog(LOG_ERR, "Error locking mutex for time log");
-            //break;
-        //}
-        write_line_to_file(thread_data->mutex, time_string);
-        //pthread_mutex_unlock(&file_mutex);
+        // ns to s overflow
+        while(ts.tv_nsec >= NSEC_PER_SEC) {
+            ts.tv_sec++;
+            ts.tv_nsec -= NSEC_PER_SEC;
+        }
+
+        if(cycle_counter == 0U) {
+            cycle_counter = LOG_CYCLE_COUNT;
+
+            // get the timestamp
+            time_t t;
+            struct tm *t_s;
+
+            time(&t);
+            t_s = localtime(&t);
+            
+            // format the time
+            (void)strftime(time_string, TIME_FORMAT_BUF_SIZE, "timestamp: %a, %d %b %Y %T %z\n", t_s);
+            
+            // write timestamp to file
+            write_line_to_file(thread_data->mutex, time_string);
+        }
         
         if(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) != 0) {
             syslog(LOG_ERR, "Error on clock_nanosleep");
             break;
         }
+
+        cycle_counter--;
     }
     
     return thread_data;
