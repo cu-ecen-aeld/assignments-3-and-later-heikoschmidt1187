@@ -1,7 +1,7 @@
-CC=${CROSS_COMPILE}gcc
+CC ?= $(CROSS_COMPILE)gcc
 
 aesdsocket: aesdsocket.o signal.o server.o
-	$(CC) -o $@ $^
+	${CC} -pthread -Wall -o $@ $^
 
 all: aesdsocket
 
