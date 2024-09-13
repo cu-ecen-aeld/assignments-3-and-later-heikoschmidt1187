@@ -30,8 +30,32 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
             size_t char_offset, size_t *entry_offset_byte_rtn )
 {
     /**
-    * TODO: implement per description
-    */
+     * TODO: implement per description
+     */
+    size_t i = 0U;
+    size_t idx = buffer->out_offs;
+
+
+    if(buffer == NULL)
+        return NULL;
+
+    while(i < AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+
+        // of offset is within element, found
+        if(char_offset < buffer->entry[idx].size) {
+            // return entry and offset within the entry
+            *entry_offset_byte_rtn = char_offset;
+            return &buffer->entry[idx];
+        }
+
+        // increment counter to avoid endless loop on full buffer
+        i++;
+
+        // decrement character offset for next round and get next element index
+        char_offset -= buffer->entry[idx].size;
+        idx = (idx + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    }
+
     return NULL;
 }
 
@@ -45,8 +69,29 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
     /**
-    * TODO: implement per description
-    */
+     * TODO: implement per description
+     */
+    // check for valid ponter
+    if(buffer == NULL)
+        return;
+
+    // insert the emtry
+    buffer->entry[buffer->in_offs] = *add_entry;
+
+    // reset full flag
+    if(buffer->in_offs != buffer->out_offs) {
+        buffer->full = false;
+    } else {
+        // in case not in init state, out has to be incremented, too
+        if(!buffer->init_state) {
+            buffer->full = true;
+            buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        }
+    }
+
+    // increment in pos
+    buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+    buffer->init_state = false;
 }
 
 /**
@@ -55,4 +100,5 @@ void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const s
 void aesd_circular_buffer_init(struct aesd_circular_buffer *buffer)
 {
     memset(buffer,0,sizeof(struct aesd_circular_buffer));
+    buffer->init_state = true;
 }

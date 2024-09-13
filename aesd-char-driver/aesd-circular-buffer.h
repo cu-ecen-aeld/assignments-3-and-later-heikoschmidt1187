@@ -49,6 +49,10 @@ struct aesd_circular_buffer
      * set to true when the buffer entry structure is full
      */
     bool full;
+    /**
+     * flag if buffer is in init state
+     */
+    bool init_state;
 };
 
 extern struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct aesd_circular_buffer *buffer,
